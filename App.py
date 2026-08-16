@@ -74,33 +74,29 @@ with col6:
 
 st.markdown("---")
 
-def read_file_safely(byte_content: bytes) -> str:
-    """Tüm Unicode, UTF-16, ANSI ve Windows-1254 dosyalarını temizleyerek metne çevirir."""
-    # Doğrudan UTF-16 LE kontrolü
-    if byte_content.startswith(b'\xff\xfe') or byte_content.startswith(b'\xfe\xff'):
+def decode_safely(raw_bytes: bytes) -> str:
+    """Tüm karakter kodlamalarını (UTF-16, ANSI, Windows-1254, UTF-8) çözer."""
+    if raw_bytes.startswith(b'\xff\xfe') or raw_bytes.startswith(b'\xfe\xff'):
         try:
-            return byte_content.decode('utf-16').replace('\ufeff', '')
+            return raw_bytes.decode('utf-16').replace('\ufeff', '')
         except Exception:
             pass
             
-    for enc in ['utf-8-sig', 'utf-8', 'windows-1254', 'iso-8859-9', 'latin1']:
+    for enc in ['utf-8-sig', 'windows-1254', 'utf-8', 'iso-8859-9', 'latin1']:
         try:
-            decoded = byte_content.decode(enc)
+            decoded = raw_bytes.decode(enc)
             if '\x00' not in decoded:
                 return decoded.replace('\ufeff', '')
         except (UnicodeDecodeError, UnicodeError):
             continue
 
-    # Null baytları ayıkla
-    clean_bytes = byte_content.replace(b'\x00', b'').replace(b'\xff\xfe', b'')
-    return clean_bytes.decode('utf-8', errors='ignore')
+    clean_b = raw_bytes.replace(b'\x00', b'').replace(b'\xff\xfe', b'')
+    return clean_b.decode('utf-8', errors='ignore')
 
 def clean_key(text: str) -> str:
-    """Metindeki tüm gereksiz boşluk ve özel karakterleri temizler."""
     return re.sub(r'[^A-Z0-9]', '', str(text).strip().upper().replace("\ufeff", "").replace("\x00", ""))
 
 def shift_timestamp_in_line(line: str, minutes_to_add: int) -> str:
-    """Satır içindeki SA:gg/aa/yyyy ss:dd:sn zamanını ileri kaydırır."""
     pattern = r'SA:(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})(\.\d+)?'
     match = re.search(pattern, line)
     if match:
@@ -124,16 +120,16 @@ if st.button("⚡ Lokasyon Bloklarını Ayıkla ve Formatlı Paketle"):
     elif personel_file is None:
         st.error("⚠️ Lütfen personel dosyasını (personel.txt) yükleyin!")
     else:
-        # 1. Personel Listesini Yükle
-        p_text = read_file_safely(personel_file.getvalue())
+        # Personel Listesi
+        p_text = decode_safely(personel_file.getvalue())
         personeller = [p.strip() for p in p_text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if p.strip()]
 
         if not personeller:
             st.error("⚠️ Personel listesi boş!")
             st.stop()
 
-        # 2. Ayıklanacak Lokasyon Listesini Yükle (Sayfa1.txt)
-        f_text = read_file_safely(filter_file.getvalue())
+        # Lokasyon Listesi (Sayfa1.txt)
+        f_text = decode_safely(filter_file.getvalue())
         f_lines = [f.strip() for f in f_text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if f.strip()]
         
         target_keys = set()
@@ -142,9 +138,9 @@ if st.button("⚡ Lokasyon Bloklarını Ayıkla ve Formatlı Paketle"):
             if c:
                 target_keys.add(c)
                 if len(c) >= 4:
-                    target_keys.add(c[-4:])  # Son 4 hane desteği
+                    target_keys.add(c[-4:])
 
-        # 3. Ana Dosyaları Oku
+        # Ana Dosyaları Oku
         all_raw_texts = []
         dosya_sayisi = 0
 
@@ -154,17 +150,17 @@ if st.button("⚡ Lokasyon Bloklarını Ayıkla ve Formatlı Paketle"):
                     for filename in z.namelist():
                         if filename.endswith(".txt") and not filename.startswith("__MACOSX"):
                             with z.open(filename) as f:
-                                all_raw_texts.append(read_file_safely(f.read()))
+                                all_raw_texts.append(decode_safely(f.read()))
                                 dosya_sayisi += 1
             elif uploaded_file.name.endswith(".txt"):
-                all_raw_texts.append(read_file_safely(uploaded_file.getvalue()))
+                all_raw_texts.append(decode_safely(uploaded_file.getvalue()))
                 dosya_sayisi += 1
 
-        st.info(f"📁 **{dosya_sayisi}** adet ana dosya, **{len(personeller)}** personel okundu.")
+        st.info(f"📁 **{dosya_sayisi}** adet dosya, **{len(personeller)}** personel okundu.")
 
-        # 4. LOCATION ... BEGIN ... ENDL Bloklarını Topla
+        # Esnek Blok Ayrıştırma
         location_blocks = {}
-        detected_loc_samples = []
+        all_detected_locs = []
 
         for full_text in all_raw_texts:
             lines = full_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -173,28 +169,32 @@ if st.button("⚡ Lokasyon Bloklarını Ayıkla ve Formatlı Paketle"):
             in_begin = False
 
             for line in lines:
-                l_strip = line.strip()
-                if not l_strip:
+                l_clean = line.strip()
+                if not l_clean:
                     continue
 
-                if l_strip.upper().startswith("LOCATION"):
-                    # LOCATION satırından lokasyon kodunu al
-                    parts = l_strip.split()
-                    if len(parts) >= 2:
-                        current_loc = parts[1].strip()
-                        if len(detected_loc_samples) < 10:
-                            detected_loc_samples.append(current_loc)
+                # LOCATION Satırı Tespiti (Önünde/arkasında boşluk veya sekme olsa dahi yakalar)
+                loc_match = re.search(r'LOCATION\s+([A-Za-z0-9_-]+)', l_clean, re.IGNORECASE)
+                if loc_match:
+                    current_loc = loc_match.group(1).strip()
+                    all_detected_locs.append(current_loc)
                     in_begin = False
                     current_items = []
-                elif l_strip.upper() == "BEGIN":
+                elif l_clean.upper() == "BEGIN":
                     in_begin = True
-                elif l_strip.upper() == "ENDL":
+                elif l_clean.upper() == "ENDL":
                     if current_loc and current_items:
                         c_loc = clean_key(current_loc)
                         
-                        # Lokasyon arananlar listesinde var mı kontrol et
-                        is_match = (c_loc in target_keys) or (len(c_loc) >= 4 and c_loc[-4:] in target_keys)
-                        
+                        # Eşleşme Kontrolü: Tam Kod veya Son 4 Hane
+                        is_match = False
+                        if c_loc in target_keys:
+                            is_match = True
+                        elif len(c_loc) >= 4 and c_loc[-4:] in target_keys:
+                            is_match = True
+                        elif any(t in c_loc for t in target_keys if len(t) >= 4):
+                            is_match = True
+
                         if is_match:
                             if current_loc not in location_blocks:
                                 location_blocks[current_loc] = []
@@ -204,16 +204,16 @@ if st.button("⚡ Lokasyon Bloklarını Ayıkla ve Formatlı Paketle"):
                     current_items = []
                     in_begin = False
                 elif in_begin:
-                    current_items.append(l_strip)
+                    current_items.append(l_clean)
 
         active_loc_keys = list(location_blocks.keys())
 
-        # 5. Sonuç Kontrolü ve Paketleme
+        # Sonuç Kontrolü ve Paketleme
         if not active_loc_keys:
             st.warning("⚠️ Aranan lokasyon blokları eşleşmedi!")
             with st.expander("🔍 Dosya Formatı Kontrolü (Hata Analizi)"):
-                st.write("**Sayfa1.txt içinden temizlenen ilk 5 hedef kod:**", list(target_keys)[:5])
-                st.write("**Ana dosyalardan okunan ilk 5 LOCATION kodu:**", detected_loc_samples[:5])
+                st.write("**Sayfa1.txt Hedef Kodları:**", list(target_keys)[:10])
+                st.write("**Ana Dosyalardan Tespit Edilen İlk 10 Lokasyon:**", all_detected_locs[:10])
         else:
             total_items_count = sum(len(v) for v in location_blocks.values())
             st.success(f"✅ Toplam **{len(active_loc_keys)}** lokasyon ({total_items_count} barkod satırı) başarıyla ayıklandı.")
@@ -227,16 +227,13 @@ if st.button("⚡ Lokasyon Bloklarını Ayıkla ve Formatlı Paketle"):
                 for i in range(0, len(active_loc_keys), pkg_size):
                     loc_chunk = active_loc_keys[i:i + pkg_size]
                     
-                    # Her paket için 1 rastgele personel seç
                     paket_personeli = random.choice(personeller)
-                    
                     rand_id = random.randint(100000, 999999)
                     file_name = f"200911{rand_id}.txt"
-                    paket_ozetleri.append(f"{file_name} -> {len(loc_chunk)} Lokasyon | Atanan Personel ID: {paket_personeli}")
+                    paket_ozetleri.append(f"{file_name} -> {len(loc_chunk)} Lokasyon | Personel ID: {paket_personeli}")
 
                     package_text_blocks = []
                     for loc in loc_chunk:
-                        # LOCATION başlığına seçilen personeli yaz
                         package_text_blocks.append(f"LOCATION          {loc:<15} {paket_personeli}")
                         package_text_blocks.append("BEGIN")
                         
